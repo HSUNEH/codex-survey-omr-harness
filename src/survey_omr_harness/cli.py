@@ -3,8 +3,12 @@ from __future__ import annotations
 import argparse
 import csv
 import json
+import base64
 import math
+import os
+import re
 import shutil
+import urllib.request
 import subprocess
 import tempfile
 from dataclasses import dataclass
@@ -208,6 +212,146 @@ def generate_sample(root: Path) -> None:
                     draw.line([x + 7, y + 22, x + 17, y + 34, x + 36, y + 8], fill="black", width=6)
         im.save(sample_dir / name)
     (sample_dir / "expected.csv").write_text("question_id,selected\n" + "\n".join(f"{k},{v}" for k, v in selections.items()) + "\n", encoding="utf-8")
+    sample_text = "# Synthetic Likert Survey\n\n" + "\n".join(f"{q['id'][1:]}. {q['text']}" for q in questions) + "\n"
+    (sample_dir / "blank_form_ocr.txt").write_text(sample_text, encoding="utf-8")
+
+
+def normalize_options(values: list[str] | None = None) -> dict[str, None]:
+    values = values or ["1", "2", "3", "4", "5"]
+    return {str(v): None for v in values}
+
+
+def parse_questions_from_text(text: str) -> list[dict[str, Any]]:
+    """Extract numbered survey questions from OCR/markdown/plain text.
+
+    This intentionally handles a conservative, reviewable subset: numbered lines
+    like `1. question`, `Q1 question`, or markdown table rows. A Vision/Codex
+    provider can produce this OCR-like text, while tests use the offline path.
+    """
+    questions: list[dict[str, Any]] = []
+    seen: set[str] = set()
+    for raw in text.splitlines():
+        line = raw.strip()
+        if not line or set(line) <= {"|", "-", ":", " "}:
+            continue
+        # Markdown row: | 1 | Question text | ... |
+        if line.startswith("|") and line.endswith("|"):
+            cells = [c.strip() for c in line.strip("|").split("|")]
+            if len(cells) >= 2 and cells[0].isdigit() and not set(cells[1]) <= {"-", ":", " "}:
+                qid = f"Q{int(cells[0])}"
+                question = cells[1]
+            else:
+                continue
+        else:
+            match = re.match(r"^(?:Q\s*)?(\d{1,3})[\).\-\s]+(.+?)\s*$", line, flags=re.IGNORECASE)
+            if not match:
+                continue
+            qid = f"Q{int(match.group(1))}"
+            question = match.group(2).strip()
+        # Strip trailing checkbox/scale artifacts from OCR-like dumps.
+        question = re.sub(r"\s+(?:[1-5]\s*){3,}$", "", question).strip()
+        question = re.sub(r"\s+(?:□\s*){2,}.*$", "", question).strip()
+        if not question or qid in seen:
+            continue
+        seen.add(qid)
+        questions.append({"id": qid, "text": question, "options": normalize_options()})
+    return questions
+
+
+def build_template_draft(survey_id: str, questions: list[dict[str, Any]], source: str, provider: str) -> dict[str, Any]:
+    if not questions:
+        raise SystemExit("no questions detected; provide cleaner OCR text or use a Vision provider")
+    return {
+        "survey_id": survey_id,
+        "source": source,
+        "provider": provider,
+        "draft": True,
+        "needs_coordinate_mapping": True,
+        "page": {"width": None, "height": None},
+        "questions": questions,
+        "notes": [
+            "Question text/options were drafted from a blank form source.",
+            "Fill each option box with [x, y, width, height] before running local OMR on completed responses.",
+            "Do not send completed response forms to AI providers unless you explicitly accept that privacy tradeoff.",
+        ],
+    }
+
+
+def extract_template_offline(input_path: Path, survey_id: str) -> dict[str, Any]:
+    text = input_path.read_text(encoding="utf-8")
+    return build_template_draft(survey_id, parse_questions_from_text(text), str(input_path), "offline")
+
+
+def image_to_data_url(path: Path) -> str:
+    mime = "image/png" if path.suffix.lower() == ".png" else "image/jpeg"
+    data = base64.b64encode(path.read_bytes()).decode("ascii")
+    return f"data:{mime};base64,{data}"
+
+
+def call_openai_template_extractor(input_path: Path, survey_id: str, model: str) -> dict[str, Any]:
+    """Optional provider for blank-form question recognition.
+
+    Kept dependency-free for easy demos. Requires OPENAI_API_KEY. Tests should use
+    `--provider offline` so the repo never needs secrets.
+    """
+    api_key = os.environ.get("OPENAI_API_KEY")
+    if not api_key:
+        raise SystemExit("OPENAI_API_KEY is required for --provider openai; use --provider offline for local tests")
+    prompt = (
+        "Extract the survey questions from this blank survey form. Return only JSON with "
+        "a `questions` array. Each item must have `id` like Q1, `text`, and `options` "
+        "with keys 1..5 and null values. Do not infer answers; this is a blank form."
+    )
+    content: list[dict[str, Any]]
+    if input_path.suffix.lower() in IMAGE_EXTS:
+        content = [
+            {"type": "input_text", "text": prompt},
+            {"type": "input_image", "image_url": image_to_data_url(input_path)},
+        ]
+    else:
+        content = [{"type": "input_text", "text": prompt + "\n\n" + input_path.read_text(encoding="utf-8")}]
+    payload = {
+        "model": model,
+        "input": [{"role": "user", "content": content}],
+        "text": {"format": {"type": "json_object"}},
+    }
+    req = urllib.request.Request(
+        "https://api.openai.com/v1/responses",
+        data=json.dumps(payload).encode("utf-8"),
+        headers={"Authorization": f"Bearer {api_key}", "Content-Type": "application/json"},
+        method="POST",
+    )
+    with urllib.request.urlopen(req, timeout=90) as resp:
+        raw = json.loads(resp.read().decode("utf-8"))
+    chunks: list[str] = []
+    for item in raw.get("output", []):
+        for part in item.get("content", []):
+            if part.get("type") in {"output_text", "text"}:
+                chunks.append(part.get("text", ""))
+    if not chunks:
+        raise SystemExit("OpenAI response did not contain output text")
+    data = json.loads("\n".join(chunks))
+    questions = data.get("questions", [])
+    for q in questions:
+        q.setdefault("options", normalize_options())
+    return build_template_draft(survey_id, questions, str(input_path), "openai")
+
+
+def cmd_extract_template(args: argparse.Namespace) -> None:
+    input_path = Path(args.input)
+    survey_id = args.survey_id or input_path.stem.replace(" ", "_").lower()
+    if args.provider == "offline":
+        draft = extract_template_offline(input_path, survey_id)
+    elif args.provider == "openai":
+        draft = call_openai_template_extractor(input_path, survey_id, args.model)
+    else:
+        raise SystemExit(f"unsupported provider: {args.provider}")
+    output = Path(args.output)
+    output.parent.mkdir(parents=True, exist_ok=True)
+    output.write_text(json.dumps(draft, ensure_ascii=False, indent=2) + "\n", encoding="utf-8")
+    print(f"wrote template draft {output}")
+    print(f"questions_detected: {len(draft['questions'])}")
+    print("needs_coordinate_mapping: true")
 
 
 def cmd_run(args: argparse.Namespace) -> None:
@@ -231,12 +375,20 @@ def main(argv: list[str] | None = None) -> None:
     run.add_argument("--template", required=True)
     run.add_argument("--input", required=True)
     run.add_argument("--output", required=True)
+    extract = sub.add_parser("extract-template", help="draft template questions from a blank form source")
+    extract.add_argument("--provider", choices=["offline", "openai"], default="offline")
+    extract.add_argument("--input", required=True, help="OCR text/markdown for offline, or blank form image/text for openai")
+    extract.add_argument("--output", required=True)
+    extract.add_argument("--survey-id")
+    extract.add_argument("--model", default="gpt-4.1-mini")
     args = parser.parse_args(argv)
     if args.command == "generate-sample":
         generate_sample(Path(args.root))
         print("generated synthetic sample")
     elif args.command == "run":
         cmd_run(args)
+    elif args.command == "extract-template":
+        cmd_extract_template(args)
 
 
 if __name__ == "__main__":

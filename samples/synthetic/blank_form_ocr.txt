@@ -1,0 +1,12 @@
+# Synthetic Likert Survey
+
+1. Synthetic survey question 1
+2. Synthetic survey question 2
+3. Synthetic survey question 3
+4. Synthetic survey question 4
+5. Synthetic survey question 5
+6. Synthetic survey question 6
+7. Synthetic survey question 7
+8. Synthetic survey question 8
+9. Synthetic survey question 9
+10. Synthetic survey question 10
