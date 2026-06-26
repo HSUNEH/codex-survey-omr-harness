@@ -1,0 +1,13 @@
+[project]
+name = "codex-survey-omr-harness"
+version = "0.1.0"
+description = "Local-first template-based OMR harness for paper survey photos/scans"
+readme = "README.md"
+requires-python = ">=3.10"
+dependencies = ["Pillow>=10.0"]
+
+[project.scripts]
+survey-omr = "survey_omr_harness.cli:main"
+
+[tool.uv]
+package = true

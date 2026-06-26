@@ -1,0 +1,158 @@
+[
+  {
+    "file": "answer_001.png",
+    "debug_overlay": "outputs/demo/debug/answer_001_overlay.jpg",
+    "answers": [
+      {
+        "question_id": "Q1",
+        "question_text": "Synthetic survey question 1",
+        "selected": "3",
+        "confidence": 0.9616,
+        "needs_review": false,
+        "review_reason": "",
+        "scores": {
+          "1": 12.1,
+          "2": 15.8,
+          "3": 506.7,
+          "4": 18.5,
+          "5": 16.5
+        }
+      },
+      {
+        "question_id": "Q2",
+        "question_text": "Synthetic survey question 2",
+        "selected": "4",
+        "confidence": 0.9643,
+        "needs_review": false,
+        "review_reason": "",
+        "scores": {
+          "1": 12.1,
+          "2": 15.8,
+          "3": 17.15,
+          "4": 508.05,
+          "5": 16.5
+        }
+      },
+      {
+        "question_id": "Q3",
+        "question_text": "Synthetic survey question 3",
+        "selected": "5",
+        "confidence": 0.9615,
+        "needs_review": false,
+        "review_reason": "",
+        "scores": {
+          "1": 12.1,
+          "2": 15.8,
+          "3": 17.15,
+          "4": 18.5,
+          "5": 506.05
+        }
+      },
+      {
+        "question_id": "Q4",
+        "question_text": "Synthetic survey question 4",
+        "selected": "1",
+        "confidence": 0.9612,
+        "needs_review": false,
+        "review_reason": "",
+        "scores": {
+          "1": 501.65,
+          "2": 15.8,
+          "3": 17.15,
+          "4": 18.5,
+          "5": 16.5
+        }
+      },
+      {
+        "question_id": "Q5",
+        "question_text": "Synthetic survey question 5",
+        "selected": "2",
+        "confidence": 0.9615,
+        "needs_review": false,
+        "review_reason": "",
+        "scores": {
+          "1": 12.1,
+          "2": 505.35,
+          "3": 17.15,
+          "4": 18.5,
+          "5": 16.5
+        }
+      },
+      {
+        "question_id": "Q6",
+        "question_text": "Synthetic survey question 6",
+        "selected": "3",
+        "confidence": 0.9616,
+        "needs_review": false,
+        "review_reason": "",
+        "scores": {
+          "1": 12.1,
+          "2": 15.8,
+          "3": 506.7,
+          "4": 18.5,
+          "5": 16.5
+        }
+      },
+      {
+        "question_id": "Q7",
+        "question_text": "Synthetic survey question 7",
+        "selected": "4",
+        "confidence": 0.9643,
+        "needs_review": false,
+        "review_reason": "",
+        "scores": {
+          "1": 12.1,
+          "2": 15.8,
+          "3": 17.15,
+          "4": 508.05,
+          "5": 16.5
+        }
+      },
+      {
+        "question_id": "Q8",
+        "question_text": "Synthetic survey question 8",
+        "selected": "5",
+        "confidence": 0.9615,
+        "needs_review": false,
+        "review_reason": "",
+        "scores": {
+          "1": 12.1,
+          "2": 15.8,
+          "3": 17.15,
+          "4": 18.5,
+          "5": 506.05
+        }
+      },
+      {
+        "question_id": "Q9",
+        "question_text": "Synthetic survey question 9",
+        "selected": "1",
+        "confidence": 0.9612,
+        "needs_review": false,
+        "review_reason": "",
+        "scores": {
+          "1": 501.65,
+          "2": 15.8,
+          "3": 17.15,
+          "4": 18.5,
+          "5": 16.5
+        }
+      },
+      {
+        "question_id": "Q10",
+        "question_text": "Synthetic survey question 10",
+        "selected": "2",
+        "confidence": 0.9615,
+        "needs_review": false,
+        "review_reason": "",
+        "scores": {
+          "1": 12.1,
+          "2": 505.35,
+          "3": 17.15,
+          "4": 18.5,
+          "5": 16.5
+        }
+      }
+    ]
+  }
+]

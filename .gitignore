@@ -1,0 +1,22 @@
+# Local/private survey data - never commit real forms or responses
+private/
+outputs/
+
+# Python
+.venv/
+__pycache__/
+*.py[cod]
+.pytest_cache/
+.DS_Store
+
+# Large/raw document inputs
+*.hwp
+*.hwpx
+*.pdf
+*.jpg
+*.jpeg
+*.png
+!samples/synthetic/*.png
+!samples/synthetic/*.json
+!templates/*.json
+*.egg-info/
