@@ -4,8 +4,10 @@ import argparse
 import csv
 import json
 import math
+import re
 import shutil
 import subprocess
+import sys
 import tempfile
 from dataclasses import dataclass
 from pathlib import Path
@@ -15,6 +17,14 @@ from PIL import Image, ImageDraw, ImageFont
 
 IMAGE_EXTS = {".png", ".jpg", ".jpeg", ".webp", ".tif", ".tiff"}
 PDF_EXTS = {".pdf"}
+DRAFT_SCHEMA_VERSION = "survey-template-draft/v1"
+LIKERT_FALLBACK_OPTIONS = [
+    "Strongly disagree",
+    "Disagree",
+    "Neutral",
+    "Agree",
+    "Strongly agree",
+]
 
 
 @dataclass
@@ -33,6 +43,126 @@ def load_template(path: Path) -> dict[str, Any]:
         if "id" not in q or "options" not in q:
             raise SystemExit("each question needs id and options")
     return data
+
+
+def _parse_option_labels(text: str) -> list[str]:
+    option_lines = []
+    for line in text.splitlines():
+        normalized = line.strip()
+        if not normalized:
+            continue
+        if re.match(r"(?i)^(options?|scale|likert)\s*[:=]", normalized):
+            option_lines.append(re.sub(r"^[^:=]+[:=]\s*", "", normalized, count=1))
+        elif re.search(r"\b1\s*=", normalized) and re.search(r"\b5\s*=", normalized):
+            option_lines.append(normalized)
+    for line in option_lines:
+        pairs = re.findall(r"(?:^|[|,;\s])(?:[1-9]|10)\s*[=:.)-]\s*([^|,;]+?)(?=\s*(?:[|,;]|\b(?:[1-9]|10)\s*[=:.)-])|$)", line)
+        labels = [p.strip() for p in pairs if p.strip()]
+        if len(labels) >= 2:
+            return labels
+        labels = [p.strip() for p in re.split(r"\s*[|;]\s*", line) if p.strip()]
+        if len(labels) >= 2:
+            return labels
+    return LIKERT_FALLBACK_OPTIONS.copy()
+
+
+def _parse_question_lines(text: str) -> list[str]:
+    questions = []
+    question_re = re.compile(r"^\s*(?:[-*]\s*)?(?:Q\s*)?(\d{1,3})[\).:-]\s+(.+?)\s*$", re.IGNORECASE)
+    for line in text.splitlines():
+        stripped = line.strip()
+        if not stripped or re.match(r"(?i)^(#|options?|scale|likert)\b", stripped):
+            continue
+        match = question_re.match(stripped)
+        if match:
+            question = match.group(2).strip()
+            if question and not re.match(r"(?i)^(strongly|disagree|agree|neutral)\b", question):
+                questions.append(question)
+    return questions
+
+
+def validate_template_draft(data: dict[str, Any]) -> None:
+    errors = []
+    if data.get("schema_version") != DRAFT_SCHEMA_VERSION:
+        errors.append(f"schema_version must be {DRAFT_SCHEMA_VERSION}")
+    if not isinstance(data.get("source"), dict):
+        errors.append("source must be an object")
+    questions = data.get("questions")
+    if not isinstance(questions, list) or not questions:
+        errors.append("questions must be a non-empty array")
+        questions = []
+    for idx, question in enumerate(questions):
+        prefix = f"questions[{idx}]"
+        if not isinstance(question, dict):
+            errors.append(f"{prefix} must be an object")
+            continue
+        for key in ("id", "text", "type"):
+            if not isinstance(question.get(key), str) or not question.get(key, "").strip():
+                errors.append(f"{prefix}.{key} must be a non-empty string")
+        options = question.get("options")
+        if not isinstance(options, list) or len(options) < 2 or not all(isinstance(v, str) and v.strip() for v in options):
+            errors.append(f"{prefix}.options must be an array of at least two labels")
+        if question.get("page") is not None and not isinstance(question.get("page"), int):
+            errors.append(f"{prefix}.page must be an integer or null")
+        bbox = question.get("bbox")
+        if bbox is not None:
+            if not isinstance(bbox, dict) or not all(k in bbox for k in ("x", "y", "width", "height")):
+                errors.append(f"{prefix}.bbox must be null or an object with x/y/width/height")
+            elif not all(isinstance(bbox[k], (int, float)) for k in ("x", "y", "width", "height")):
+                errors.append(f"{prefix}.bbox values must be numeric")
+        confidence = question.get("confidence")
+        if not isinstance(confidence, (int, float)) or not 0 <= confidence <= 1:
+            errors.append(f"{prefix}.confidence must be a number from 0 to 1")
+    if errors:
+        raise ValueError("; ".join(errors))
+
+
+def extract_template_draft_offline(input_path: Path, sidecar_path: Path | None = None) -> dict[str, Any]:
+    text_path = sidecar_path or input_path
+    if text_path.suffix.lower() not in {".txt", ".md", ".ocr"}:
+        raise SystemExit("offline template extraction needs --sidecar pointing to a .txt/.md/.ocr text dump")
+    if not text_path.exists():
+        raise SystemExit(f"sidecar text not found: {text_path}")
+    text = text_path.read_text(encoding="utf-8")
+    labels = _parse_option_labels(text)
+    questions = _parse_question_lines(text)
+    draft = {
+        "schema_version": DRAFT_SCHEMA_VERSION,
+        "source": {
+            "provider": "offline-text",
+            "input": str(input_path),
+            "sidecar": str(text_path),
+        },
+        "questions": [
+            {
+                "id": f"Q{idx}",
+                "text": question,
+                "type": "likert",
+                "options": labels,
+                "page": None,
+                "bbox": None,
+                "confidence": 0.85,
+            }
+            for idx, question in enumerate(questions, start=1)
+        ],
+    }
+    validate_template_draft(draft)
+    return draft
+
+
+def build_openai_vision_prompt_package(input_path: Path) -> dict[str, Any]:
+    return {
+        "schema_version": "openai-vision-template-extraction-prompt/v1",
+        "provider_role": "AI/Vision drafts question text, Likert labels, and optional rough anchors from a blank form only.",
+        "source": {"input": str(input_path)},
+        "instructions": [
+            "Read the blank survey form image/PDF and return only JSON.",
+            f"Use schema_version {DRAFT_SCHEMA_VERSION} for the response.",
+            "For each recognized question include id, text, type, options, page, bbox, and confidence.",
+            "Use type='likert' when a Likert scale is likely; set bbox=null if unsure.",
+            "Do not process completed response forms; completed-response OMR stays local-first.",
+        ],
+    }
 
 
 def iter_input_images(input_path: Path, work_dir: Path) -> Iterable[Path]:
@@ -207,6 +337,14 @@ def generate_sample(root: Path) -> None:
                 if marked.get(q["id"]) == v:
                     draw.line([x + 7, y + 22, x + 17, y + 34, x + 36, y + 8], fill="black", width=6)
         im.save(sample_dir / name)
+    sidecar_lines = [
+        "# Synthetic Likert Survey OCR Sidecar",
+        "",
+        "Options: 1=Strongly disagree | 2=Disagree | 3=Neutral | 4=Agree | 5=Strongly agree",
+        "",
+    ]
+    sidecar_lines.extend(f"{q['id']}. {q['text']}" for q in questions)
+    (sample_dir / "blank_form.ocr.txt").write_text("\n".join(sidecar_lines) + "\n", encoding="utf-8")
     (sample_dir / "expected.csv").write_text("question_id,selected\n" + "\n".join(f"{k},{v}" for k, v in selections.items()) + "\n", encoding="utf-8")
 
 
@@ -222,6 +360,32 @@ def cmd_run(args: argparse.Namespace) -> None:
     print(f"wrote debug overlays under {debug_dir}")
 
 
+def cmd_extract_template(args: argparse.Namespace) -> None:
+    input_path = Path(args.input)
+    output_path = Path(args.output)
+    if args.provider == "offline":
+        draft = extract_template_draft_offline(input_path, Path(args.sidecar) if args.sidecar else None)
+    elif args.provider == "openai-vision":
+        if not args.prompt_package:
+            raise SystemExit("openai-vision provider is call-free in this harness; pass --prompt-package to write the request package")
+        draft = build_openai_vision_prompt_package(input_path)
+    else:
+        raise SystemExit(f"unsupported provider: {args.provider}")
+    output_path.parent.mkdir(parents=True, exist_ok=True)
+    output_path.write_text(json.dumps(draft, ensure_ascii=False, indent=2) + "\n", encoding="utf-8")
+    print(f"wrote {output_path}")
+
+
+def cmd_validate_template_draft(args: argparse.Namespace) -> None:
+    try:
+        data = json.loads(Path(args.input).read_text(encoding="utf-8"))
+        validate_template_draft(data)
+    except (OSError, json.JSONDecodeError, ValueError) as exc:
+        print(f"template draft validation failed: {exc}", file=sys.stderr)
+        raise SystemExit(1) from exc
+    print("template draft valid")
+
+
 def main(argv: list[str] | None = None) -> None:
     parser = argparse.ArgumentParser(description="Local-first template-based paper survey OMR harness")
     sub = parser.add_subparsers(dest="command", required=True)
@@ -231,12 +395,24 @@ def main(argv: list[str] | None = None) -> None:
     run.add_argument("--template", required=True)
     run.add_argument("--input", required=True)
     run.add_argument("--output", required=True)
+    extract = sub.add_parser("extract-template", help="draft a blank-form question template from sidecar/OCR text")
+    extract.add_argument("--provider", choices=["offline", "openai-vision"], default="offline")
+    extract.add_argument("--input", required=True, help="blank form image/PDF, or text file when provider=offline")
+    extract.add_argument("--sidecar", help="offline .txt/.md/.ocr dump containing recognized question text")
+    extract.add_argument("--output", required=True, help="path to write the template draft JSON")
+    extract.add_argument("--prompt-package", action="store_true", help="write a call-free OpenAI Vision prompt package instead of calling an API")
+    validate = sub.add_parser("validate-template-draft", help="validate a template draft JSON file")
+    validate.add_argument("--input", required=True)
     args = parser.parse_args(argv)
     if args.command == "generate-sample":
         generate_sample(Path(args.root))
         print("generated synthetic sample")
     elif args.command == "run":
         cmd_run(args)
+    elif args.command == "extract-template":
+        cmd_extract_template(args)
+    elif args.command == "validate-template-draft":
+        cmd_validate_template_draft(args)
 
 
 if __name__ == "__main__":

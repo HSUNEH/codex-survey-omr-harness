@@ -1,0 +1,14 @@
+# Synthetic Likert Survey OCR Sidecar
+
+Options: 1=Strongly disagree | 2=Disagree | 3=Neutral | 4=Agree | 5=Strongly agree
+
+Q1. Synthetic survey question 1
+Q2. Synthetic survey question 2
+Q3. Synthetic survey question 3
+Q4. Synthetic survey question 4
+Q5. Synthetic survey question 5
+Q6. Synthetic survey question 6
+Q7. Synthetic survey question 7
+Q8. Synthetic survey question 8
+Q9. Synthetic survey question 9
+Q10. Synthetic survey question 10
