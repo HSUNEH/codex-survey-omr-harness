@@ -17,6 +17,11 @@ from typing import Any, Iterable
 
 from PIL import Image, ImageDraw, ImageFont
 
+try:
+    RESAMPLE_BICUBIC = Image.Resampling.BICUBIC
+except AttributeError:  # Pillow < 9
+    RESAMPLE_BICUBIC = Image.BICUBIC
+
 IMAGE_EXTS = {".png", ".jpg", ".jpeg", ".webp", ".tif", ".tiff"}
 PDF_EXTS = {".pdf"}
 
@@ -57,6 +62,134 @@ def iter_input_images(input_path: Path, work_dir: Path) -> Iterable[Path]:
                 yield rendered
 
 
+
+def solve_linear_system(matrix: list[list[float]], vector: list[float]) -> list[float]:
+    """Solve a small dense linear system with Gaussian elimination."""
+    n = len(vector)
+    a = [row[:] + [vector[i]] for i, row in enumerate(matrix)]
+    for col in range(n):
+        pivot = max(range(col, n), key=lambda r: abs(a[r][col]))
+        if abs(a[pivot][col]) < 1e-9:
+            raise ValueError("singular perspective system")
+        a[col], a[pivot] = a[pivot], a[col]
+        div = a[col][col]
+        a[col] = [v / div for v in a[col]]
+        for row in range(n):
+            if row == col:
+                continue
+            factor = a[row][col]
+            if factor:
+                a[row] = [a[row][i] - factor * a[col][i] for i in range(n + 1)]
+    return [a[i][n] for i in range(n)]
+
+
+def perspective_coefficients(src_points: list[tuple[float, float]], dst_points: list[tuple[float, float]]) -> list[float]:
+    """Return PIL perspective coefficients mapping output points to source points.
+
+    For Image.transform(PERSPECTIVE), coefficients map destination/output x,y
+    back into source image coordinates. Pass `src_points` as points in the source
+    image and `dst_points` as the corresponding normalized output points.
+    """
+    rows: list[list[float]] = []
+    vals: list[float] = []
+    for (x, y), (u, v) in zip(dst_points, src_points):
+        rows.append([x, y, 1, 0, 0, 0, -u * x, -u * y])
+        vals.append(u)
+        rows.append([0, 0, 0, x, y, 1, -v * x, -v * y])
+        vals.append(v)
+    return solve_linear_system(rows, vals)
+
+
+def detect_dark_component_center(gray: Image.Image, region: tuple[int, int, int, int], threshold: int) -> tuple[float, float, tuple[int, int, int, int], int]:
+    """Find the largest square-ish dark component in a corner region."""
+    x0, y0, x1, y1 = region
+    pix = gray.load()
+    w, h = gray.size
+    x0, y0 = max(0, x0), max(0, y0)
+    x1, y1 = min(w, x1), min(h, y1)
+    visited: set[tuple[int, int]] = set()
+    best: tuple[float, float, tuple[int, int, int, int], int] | None = None
+    best_score = -1.0
+    for sy in range(y0, y1):
+        for sx in range(x0, x1):
+            if (sx, sy) in visited or pix[sx, sy] >= threshold:
+                continue
+            stack = [(sx, sy)]
+            visited.add((sx, sy))
+            minx = maxx = sx
+            miny = maxy = sy
+            area = 0
+            while stack:
+                x, y = stack.pop()
+                area += 1
+                minx, maxx = min(minx, x), max(maxx, x)
+                miny, maxy = min(miny, y), max(maxy, y)
+                for nx, ny in ((x + 1, y), (x - 1, y), (x, y + 1), (x, y - 1)):
+                    if nx < x0 or nx >= x1 or ny < y0 or ny >= y1 or (nx, ny) in visited:
+                        continue
+                    if pix[nx, ny] < threshold:
+                        visited.add((nx, ny))
+                        stack.append((nx, ny))
+            bw, bh = maxx - minx + 1, maxy - miny + 1
+            if area < 80 or bw < 8 or bh < 8:
+                continue
+            fill = area / max(1, bw * bh)
+            aspect = min(bw, bh) / max(bw, bh)
+            # Text glyphs are thinner/lower fill; solid corner markers score high.
+            score = area * fill * aspect
+            if score > best_score:
+                best_score = score
+                best = ((minx + maxx) / 2, (miny + maxy) / 2, (minx, miny, maxx, maxy), area)
+    if best is None:
+        raise ValueError("corner marker not found")
+    return best
+
+
+def marker_destination_points(template: dict[str, Any]) -> list[tuple[float, float]]:
+    page = template.get("page", {})
+    width = float(page.get("width") or 0)
+    height = float(page.get("height") or 0)
+    if width <= 0 or height <= 0:
+        raise ValueError("template page.width/page.height required for marker alignment")
+    alignment = template.get("alignment", {}) or {}
+    if "marker_centers" in alignment:
+        pts = alignment["marker_centers"]
+        if len(pts) != 4:
+            raise ValueError("alignment.marker_centers must contain 4 points: tl,tr,br,bl")
+        return [(float(x), float(y)) for x, y in pts]
+    inset = float(alignment.get("marker_inset", max(35.0, min(width, height) * 0.035)))
+    return [(inset, inset), (width - inset, inset), (width - inset, height - inset), (inset, height - inset)]
+
+
+def align_image_by_markers(image: Image.Image, template: dict[str, Any]) -> tuple[Image.Image, dict[str, Any]]:
+    page = template.get("page", {})
+    width = int(page.get("width") or 0)
+    height = int(page.get("height") or 0)
+    if width <= 0 or height <= 0:
+        raise ValueError("template page.width/page.height required for marker alignment")
+    gray = image.convert("L")
+    w, h = gray.size
+    qx, qy = w // 2, h // 2
+    threshold = int((template.get("alignment", {}) or {}).get("marker_threshold", 90))
+    regions = [
+        (0, 0, qx, qy),
+        (qx, 0, w, qy),
+        (qx, qy, w, h),
+        (0, qy, qx, h),
+    ]
+    detections = [detect_dark_component_center(gray, region, threshold) for region in regions]
+    src = [(d[0], d[1]) for d in detections]  # tl,tr,br,bl marker centers in photo/source
+    dst = marker_destination_points(template)  # same points in normalized output
+    coeffs = perspective_coefficients(src, dst)
+    aligned = image.transform((width, height), Image.Transform.PERSPECTIVE, coeffs, resample=RESAMPLE_BICUBIC, fillcolor="white")
+    meta = {
+        "source_marker_centers": [[round(x, 2), round(y, 2)] for x, y in src],
+        "destination_marker_centers": [[round(x, 2), round(y, 2)] for x, y in dst],
+        "source_marker_boxes": [list(d[2]) for d in detections],
+    }
+    return aligned, meta
+
+
 def score_box(gray: Image.Image, box: list[int] | tuple[int, int, int, int], threshold: int = 180) -> tuple[float, float]:
     x, y, w, h = [int(v) for v in box]
     # Avoid border lines and printed labels by focusing on inner pixels.
@@ -85,8 +218,17 @@ def score_box(gray: Image.Image, box: list[int] | tuple[int, int, int, int], thr
     return score, (dark / total if total else 0.0)
 
 
-def read_image(image_path: Path, template: dict[str, Any], output_debug: Path | None = None) -> dict[str, Any]:
+def read_image(image_path: Path, template: dict[str, Any], output_debug: Path | None = None, align_markers: bool = False, output_aligned: Path | None = None) -> dict[str, Any]:
     image = Image.open(image_path).convert("RGB")
+    alignment_meta: dict[str, Any] = {}
+    aligned_path = ""
+    if align_markers:
+        image, alignment_meta = align_image_by_markers(image, template)
+        if output_aligned:
+            output_aligned.mkdir(parents=True, exist_ok=True)
+            aligned = output_aligned / f"{image_path.stem}_aligned.png"
+            image.save(aligned)
+            aligned_path = str(aligned)
     gray = image.convert("L")
     draw = ImageDraw.Draw(image)
     rows = []
@@ -128,7 +270,7 @@ def read_image(image_path: Path, template: dict[str, Any], output_debug: Path | 
         output_debug.mkdir(parents=True, exist_ok=True)
         debug_path = output_debug / f"{image_path.stem}_overlay.jpg"
         image.save(debug_path, quality=90)
-    return {"file": image_path.name, "debug_overlay": str(debug_path) if debug_path else "", "answers": rows}
+    return {"file": image_path.name, "debug_overlay": str(debug_path) if debug_path else "", "aligned_image": aligned_path, "alignment": alignment_meta, "answers": rows}
 
 
 def write_results(results: list[dict[str, Any]], template: dict[str, Any], output_dir: Path) -> None:
@@ -185,9 +327,18 @@ def generate_sample(root: Path) -> None:
         y = y0 + (q - 1) * gap_y
         opts = {str(v): [x0 + (v - 1) * gap_x, y - 20, box, box] for v in range(1, 6)}
         questions.append({"id": f"Q{q}", "text": f"Synthetic survey question {q}", "options": opts})
+    marker_size = 34
+    marker_margin = 28
+    marker_centers = [
+        [marker_margin + marker_size / 2, marker_margin + marker_size / 2],
+        [width - marker_margin - marker_size / 2, marker_margin + marker_size / 2],
+        [width - marker_margin - marker_size / 2, height - marker_margin - marker_size / 2],
+        [marker_margin + marker_size / 2, height - marker_margin - marker_size / 2],
+    ]
     template = {
         "survey_id": "synthetic_likert_demo",
         "page": {"width": width, "height": height},
+        "alignment": {"marker_centers": marker_centers, "marker_threshold": 90},
         "min_confidence": 0.12,
         "no_mark_dark_ratio": 0.015,
         "questions": questions,
@@ -199,6 +350,8 @@ def generate_sample(root: Path) -> None:
     for name, marked in [("blank_form.png", {}), ("answer_001.png", selections)]:
         im = Image.new("RGB", (width, height), "white")
         draw = ImageDraw.Draw(im)
+        for mx, my in [(marker_margin, marker_margin), (width - marker_margin - marker_size, marker_margin), (width - marker_margin - marker_size, height - marker_margin - marker_size), (marker_margin, height - marker_margin - marker_size)]:
+            draw.rectangle([mx, my, mx + marker_size, my + marker_size], fill="black")
         draw.text((80, 80), "Synthetic Likert Survey (public dummy data)", fill="black")
         draw.text((80, 130), "1=Strongly disagree  5=Strongly agree", fill="black")
         for q in questions:
@@ -214,6 +367,14 @@ def generate_sample(root: Path) -> None:
     (sample_dir / "expected.csv").write_text("question_id,selected\n" + "\n".join(f"{k},{v}" for k, v in selections.items()) + "\n", encoding="utf-8")
     sample_text = "# Synthetic Likert Survey\n\n" + "\n".join(f"{q['id'][1:]}. {q['text']}" for q in questions) + "\n"
     (sample_dir / "blank_form_ocr.txt").write_text(sample_text, encoding="utf-8")
+    # A phone-photo-like perspective sample: same checked form, shifted and skewed.
+    src_image = Image.open(sample_dir / "answer_001.png").convert("RGB")
+    photo_size = (1300, 1750)
+    src_page = [(0.0, 0.0), (float(width), 0.0), (float(width), float(height)), (0.0, float(height))]
+    dst_photo = [(150.0, 95.0), (1160.0, 185.0), (1055.0, 1600.0), (235.0, 1505.0)]
+    coeffs = perspective_coefficients(src_page, dst_photo)
+    warped = src_image.transform(photo_size, Image.Transform.PERSPECTIVE, coeffs, resample=RESAMPLE_BICUBIC, fillcolor="white")
+    warped.save(sample_dir / "answer_001_phone_photo.png")
 
 
 def normalize_options(values: list[str] | None = None) -> dict[str, None]:
@@ -358,8 +519,9 @@ def cmd_run(args: argparse.Namespace) -> None:
     template = load_template(Path(args.template))
     output_dir = Path(args.output)
     debug_dir = output_dir / "debug"
+    aligned_dir = output_dir / "aligned" if args.align_markers else None
     with tempfile.TemporaryDirectory(prefix="survey-omr-") as tmp:
-        results = [read_image(p, template, debug_dir) for p in iter_input_images(Path(args.input), Path(tmp))]
+        results = [read_image(p, template, debug_dir, align_markers=args.align_markers, output_aligned=aligned_dir) for p in iter_input_images(Path(args.input), Path(tmp))]
     write_results(results, template, output_dir)
     print(f"wrote {output_dir / 'results.csv'}")
     print(f"wrote {output_dir / 'report.md'}")
@@ -375,6 +537,7 @@ def main(argv: list[str] | None = None) -> None:
     run.add_argument("--template", required=True)
     run.add_argument("--input", required=True)
     run.add_argument("--output", required=True)
+    run.add_argument("--align-markers", action="store_true", help="detect four black corner markers and normalize phone photos before OMR")
     extract = sub.add_parser("extract-template", help="draft template questions from a blank form source")
     extract.add_argument("--provider", choices=["offline", "openai"], default="offline")
     extract.add_argument("--input", required=True, help="OCR text/markdown for offline, or blank form image/text for openai")

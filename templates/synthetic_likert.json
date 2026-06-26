@@ -4,6 +4,27 @@
     "width": 1000,
     "height": 1400
   },
+  "alignment": {
+    "marker_centers": [
+      [
+        45.0,
+        45.0
+      ],
+      [
+        955.0,
+        45.0
+      ],
+      [
+        955.0,
+        1355.0
+      ],
+      [
+        45.0,
+        1355.0
+      ]
+    ],
+    "marker_threshold": 90
+  },
   "min_confidence": 0.12,
   "no_mark_dark_ratio": 0.015,
   "questions": [

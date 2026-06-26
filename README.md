@@ -51,6 +51,8 @@ outputs/demo/results.csv
 outputs/demo/report.md
 outputs/demo/results.json
 outputs/demo/debug/answer_001_overlay.jpg
+outputs/align_demo/aligned/answer_001_phone_photo_aligned.png
+outputs/align_demo/debug/answer_001_phone_photo_overlay.jpg
 ```
 
 ## Template schema
@@ -103,6 +105,31 @@ uv run survey-omr extract-template \
 
 The draft sets option boxes to `null` and `needs_coordinate_mapping: true`. Fill coordinates manually or with a review tool before running local OMR.
 
+## Phone-photo marker alignment
+
+Use `--align-markers` when completed forms are photographed by phone instead of rendered/scanned at the exact template size. The runner detects four black corner markers, perspective-warps the photo into the template page size, then applies the normal option-box coordinates.
+
+Template support:
+
+```json
+{
+  "page": { "width": 1000, "height": 1400 },
+  "alignment": {
+    "marker_centers": [[45, 45], [955, 45], [955, 1355], [45, 1355]],
+    "marker_threshold": 90
+  }
+}
+```
+
+`marker_centers` order is top-left, top-right, bottom-right, bottom-left in the normalized template coordinate system. If omitted, the runner uses an inset default based on page size.
+
+Photo guidance:
+
+- Keep all four black markers visible.
+- Keep the whole page in frame.
+- Avoid strong shadows, glare, and motion blur.
+- Moderate rotation/skew is OK; missing markers fail closed instead of guessing.
+
 ## Privacy model
 
 Committed/public:
@@ -129,8 +156,8 @@ brew install poppler
 
 ## Current limits
 
-- v1 assumes the completed form is already aligned to the template coordinate system, or came from a consistent scan/render pipeline.
-- Phone-photo perspective correction is intentionally left as the next slice.
+- `--align-markers` expects four high-contrast corner markers. If a marker is cut off or hidden by glare, alignment fails closed.
+- The normalized template still needs reviewed option-box coordinates; arbitrary checkbox coordinate inference is out of scope.
 - Handwritten/free-text OCR is out of scope.
 
 ## Development checks
@@ -139,5 +166,6 @@ brew install poppler
 uv run survey-omr generate-sample --root .
 uv run survey-omr extract-template --provider offline --input samples/synthetic/blank_form_ocr.txt --output outputs/extract_demo/template_draft.json --survey-id synthetic_draft
 uv run survey-omr run --template templates/synthetic_likert.json --input samples/synthetic/answer_001.png --output outputs/demo
+uv run survey-omr run --template templates/synthetic_likert.json --input samples/synthetic/answer_001_phone_photo.png --output outputs/align_demo --align-markers
 python -m compileall src
 ```
